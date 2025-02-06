@@ -1,1 +1,1 @@
-
+Built a stock price prediction tool which predicts the price of the stock for intraday trading. And also this tool providessentimental analysis of a stock it's sentimental score. And in the conclusion it suggests whether we can buy this stock or not
