@@ -22,7 +22,7 @@ locale.setlocale(locale.LC_ALL, 'en_IN.UTF-8')
 # GEMINI AI MODEL OBJECT
 apiKey = os.getenv("API_KEY")
 api_key = apiKey
-genai.configure(api_key="AIzaSyCVqvNbr3FxLrBI1cAcLXUlM4hp3d4Zvrw")
+genai.configure(api_key="your_api_key")
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 
