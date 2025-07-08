@@ -1,45 +1,61 @@
-import yfinance as yf
-import pandas as pd
+from alpha_vantage.timeseries import TimeSeries
 from statsmodels.tsa.arima.model import ARIMA
+import pandas as pd
+import os
 
-# Function to fetch stock data
-def fetch_stock_data(ticker_symbol):
-    data = data = yf.Ticker(ticker_symbol).history(start ='2025-02-08', end='2025-02-13', interval="1m")
-    return data
+# Load API key from environment
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
 
-# Function to fit ARIMA model and predict the next day's stock price
-def predict_stock_action(ticker_symbol):
-    # Fetch historical data
-    data = fetch_stock_data(ticker_symbol)  # Change dates to yesterday and today
-    
-    # Check if the data is available
-    if data.empty:
-        raise ValueError("No data available for the specified date range.")
-    
-    # Prepare data for modeling
+def fetch_data_alpha(symbol):
+    try:
+        ts = TimeSeries(key=ALPHA_VANTAGE_KEY, output_format='pandas')
+        data, _ = ts.get_daily(symbol=symbol, outputsize='compact')
+
+        if data.empty:
+            raise ValueError("No data returned from Alpha Vantage. Check symbol or rate limit.")
+
+        # Rename columns for consistency
+        data.rename(columns={
+            '1. open': 'Open',
+            '2. high': 'High',
+            '3. low': 'Low',
+            '4. close': 'Close',
+            '5. volume': 'Volume'
+        }, inplace=True)
+
+        data.reset_index(inplace=True)
+        return data
+
+    except Exception as e:
+        print(f"🔴 Data fetch failed: {e}")
+        return pd.DataFrame()
+
+def predict_stock_action(symbol):
+    data = fetch_data_alpha(symbol)
+
+    if data.empty or len(data) < 10:
+        raise ValueError("⚠️ Not enough data for ARIMA model.")
+
+    # Sort by date (ascending)
+    data.sort_values('date', inplace=True)
+
+    # Use 'Close' price for prediction
     data['Price'] = data['Close']
     data.dropna(inplace=True)
 
-    # Fit the ARIMA model
-    model = ARIMA(data['Price'], order=(5, 1, 0))
-    model_fit = model.fit()
-    
-    # Forecast the next day's price
-    forecast = model_fit.forecast(steps=1)
-    predicted_price = forecast.iloc[0]
-    
-    # Get the last price
+    # Fit ARIMA model
+    try:
+        model = ARIMA(data['Price'], order=(5, 1, 0))
+        model_fit = model.fit()
+        forecast = model_fit.forecast(steps=1)
+        predicted_price = forecast.iloc[0]
+    except Exception as e:
+        raise RuntimeError(f"ARIMA model failed: {e}")
+
+    # Last actual price
     last_price = data['Price'].iloc[-1]
 
-    # Determine buy/sell action
-    if predicted_price > last_price:
-        action = "Buy"
-        
-    else:
-        action = "Sell"
+    # Suggest action
+    action = "Buy" if predicted_price > last_price else "Sell"
 
-    return last_price, predicted_price, action
-
-
-last , predict, review = predict_stock_action('rpower.NS')
-print(last, predict, review)
+    return last_price, predicted_price, action, data
