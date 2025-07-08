@@ -1,271 +1,200 @@
-import streamlit as st 
-import google.generativeai as genai
-from dotenv import load_dotenv
+import streamlit as st
 import os
 import pandas as pd
-from datetime import datetime, timedelta
-import plotly.express as px
-from yahooquery import search
-import yfinance as yf
-import matplotlib.pyplot as plt
-import time
-import plotly.graph_objects as go
 import locale
-from arima import predict_stock_action
+from datetime import datetime
+from dotenv import load_dotenv
+from alpha_vantage.timeseries import TimeSeries
+from statsmodels.tsa.arima.model import ARIMA
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import plotly.graph_objects as go
+import google.generativeai as genai
 
-
-# LODING API KEY 
+# ------------------ SETUP ------------------
 load_dotenv()
 locale.setlocale(locale.LC_ALL, 'en_IN.UTF-8')
 
-# GEMINI AI MODEL OBJECT
-apiKey = os.getenv("API_KEY")
-api_key = apiKey
-genai.configure(api_key="your_api_key")
+# API KEYS
+GEMINI_API_KEY = os.getenv("API_KEY")
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
+
+# Gemini Model Init
+genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
 
+# Sentiment Analyzer Init
+analyzer = SentimentIntensityAnalyzer()
 
-# GEMINI API CALL - 1 : FOR TEXT GENERATION 
-def ai_call(stocks, actual_price, predicted_price, sentment_score=0): 
-        prompt = f'Write a short paragraph advising whether or not to buy {stocks} stock based on the following information: * current market price = {actual_price} * Predicted trend for TCS is = {predicted_price}. The advice should be concise and clear, focusing on the key points with current market sentiment'
+# ------------------ AI CALL ------------------
+def ai_call(stock, actual_price, predicted_price, sentiment_score=0):
+    prompt = f"""
+    Write a short paragraph advising whether to BUY or SELL {stock} stock.
+    - Current price: ₹{actual_price}
+    - Predicted price: ₹{predicted_price}
+    - Market sentiment score: {sentiment_score}
+    Keep it concise and helpful.
+    """
+    try:
         response = model.generate_content(prompt)
-        return response.text
+        return response.text.strip()
+    except Exception as e:
+        return "AI response failed."
 
+# ------------------ SENTIMENT ------------------
+def get_sentiment_review(text):
+    sentiment = analyzer.polarity_scores(text)
+    compound = sentiment['compound']
+    score = int((compound + 1) * 50)
+    if compound >= 0.05:
+        return score, "Positive"
+    elif compound <= -0.05:
+        return score, "Negative"
+    else:
+        return score, "Neutral"
 
-# BUY AND SELL INDICATIOR CSS
+# ------------------ STYLE ------------------
 def indicator(label, color):
-    custom_html = f"""
-    <div style="text-align: center;">
+    html = f"""
+    <div style="text-align:center;">
         <button style="
-            background-color: {color};
-            width: 100%;
-            color: white;mmnbgbij
-             border: none;
-            padding: 10px 20px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 16px;">
+            background-color:{color};
+            color:white;
+            width:100%;
+            border:none;
+            padding:10px;
+            font-size:18px;
+            border-radius:8px;">
             {label}
         </button>
     </div>
     """
-    st.markdown(custom_html, unsafe_allow_html=True)
+    st.markdown(html, unsafe_allow_html=True)
 
+# ------------------ GET SYMBOL ------------------
+def get_stock_symbol(user_input, exchange):
+    suffix = "BSE" if exchange == "BSE" else "NS"
+    return f"{user_input.upper()}.{suffix}"
 
-# STOCK SYMBOL RETRIVE FUNCTION
-def get_stock_symbol(company_name):
-    symbol = ''
-    response = search(company_name)
-    for result in response['quotes']:
-        if '.NS' in result['symbol']:
-            symbol = result['symbol']
-            break
-        print(symbol)
+# ------------------ FETCH DAILY DATA ------------------
+def fetch_data_alpha(symbol):
+    try:
+        ts = TimeSeries(key=ALPHA_VANTAGE_KEY, output_format='pandas')
+        data, _ = ts.get_daily(symbol=symbol, outputsize='compact')
 
-    return symbol
+        if data.empty:
+            raise ValueError("No data returned from Alpha Vantage. Check symbol or rate limit.")
 
+        data.rename(columns={
+            '1. open': 'Open',
+            '2. high': 'High',
+            '3. low': 'Low',
+            '4. close': 'Close',
+            '5. volume': 'Volume'
+        }, inplace=True)
 
+        data.reset_index(inplace=True)
+        return data
 
-# SENTIMENT ANALYZER OBJECT
-analyzer = SentimentIntensityAnalyzer()
+    except Exception as e:
+        st.error(f"🔴 Data fetch failed: {e}")
+        return pd.DataFrame()
 
-# SENTIMENT ANALYZER FUNCTION
-def get_sentiment_review(text):
-    sentiment = analyzer.polarity_scores(text)
-    compound_score = sentiment['compound']
+# ------------------ ARIMA MODEL ------------------
+def predict_stock_action(symbol):
+    data = fetch_data_alpha(symbol)
 
-    if compound_score >= 0.05:
-        review = "Positive"
-    elif compound_score <= -0.05:
-        review = "Negative"
-    else:
-        review = "Neutral"
-    
-    normalized_score = int((compound_score + 1) * 50)
-    return normalized_score, review
+    if data.empty or len(data) < 10:
+        raise ValueError("⚠️ Not enough data for ARIMA model.")
 
+    data.sort_values('date', inplace=True)
+    data['Price'] = data['Close']
+    data.dropna(inplace=True)
 
+    try:
+        model = ARIMA(data['Price'], order=(5, 1, 0))
+        model_fit = model.fit()
+        forecast = model_fit.forecast(steps=1)
+        predicted_price = forecast.iloc[0]
+    except Exception as e:
+        raise RuntimeError(f"ARIMA model failed: {e}")
 
-# GRAPH PLOTING 
-def plot_graph(ticker_symbol):
-    
-    if ticker_symbol:
-        try:
-            # Fetch stock data
-            stock_data = yf.Ticker(ticker_symbol)
+    last_price = data['Price'].iloc[-1]
+    action = "Buy" if predicted_price > last_price else "Sell"
+    return last_price, predicted_price, action, data
 
-            # Calculating previous day date
-            today_date = datetime.now()
-            previous_day = (today_date - timedelta(days=1)).strftime('%Y-%m-%d')
+# ------------------ PLOT & DISPLAY ------------------
+def plot_graph(symbol):
+    try:
+        last_price, predicted_price, action, df = predict_stock_action(symbol)
+        formatted_price = locale.currency(last_price, grouping=True)
 
+        fig = go.Figure(data=[go.Candlestick(
+            x=df['date'],
+            open=df['Open'], high=df['High'],
+            low=df['Low'], close=df['Close'],
+            increasing_line_color='green',
+            decreasing_line_color='red'
+        )])
+        fig.update_layout(
+            title=f'{symbol} - Daily Candlestick',
+            xaxis_title='Date',
+            yaxis_title='Price (INR)',
+            xaxis_rangeslider_visible=False
+        )
 
-            # Fetch data for the previous last
-            historical_data = stock_data.history(period="5d", interval="1m")
+        st.header(f"📈 Live Stock Price: {formatted_price}")
+        st.plotly_chart(fig, use_container_width=True)
 
-            # Reset index to access datetime
-            historical_data = historical_data.reset_index()
-            historical_data['Datetime'] = pd.to_datetime(historical_data['Datetime'])
+        st.subheader("📊 Buy/Sell Recommendation")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write(f"**Actual Price:** ₹{round(last_price, 2)}")
+        with c2:
+            st.write(f"**Predicted Price:** ₹{round(predicted_price, 2)}")
 
-            # Filter for the previous day's data
-            historical_data = historical_data[
-                historical_data['Datetime'].dt.date == pd.to_datetime(previous_day).date()
-            ]
+        advice = ai_call(symbol, round(last_price, 2), round(predicted_price, 2))
+        score, review = get_sentiment_review(advice)
 
-            
+        indicator("BUY" if action == "Buy" else "SELL", "#1dcf46" if action == "Buy" else "red")
 
-            if not historical_data.empty:
-                # Select Datetime and Close columns
-                plot_data = historical_data[['Datetime', 'Close']]
+        st.subheader("🧠 Market Sentiment")
+        s1, s2 = st.columns(2)
+        with s1:
+            st.markdown(f"**Score:** {score}")
+        with s2:
+            st.markdown(f"**Review:** {review}")
 
-                fig = go.Figure(data=[go.Candlestick(
-                    x=historical_data['Datetime'],
-                    open=historical_data['Open'],
-                    high=historical_data['High'],
-                    low=historical_data['Low'],
-                    close=historical_data['Close'],
-                    increasing_line_color='green',
-                    decreasing_line_color='red'
-                )])
+        st.subheader("✨ AI Investment Suggestion")
+        st.write(advice)
 
-                fig.update_layout(
-                    title=f'{ticker_symbol.upper()}',
-                    xaxis_title='Time',
-                    yaxis_title='Stock Price (INR)',
-                    xaxis_rangeslider_visible=False
-                )
+        st.subheader("📄 Raw Data (Latest 5)")
+        st.dataframe(df.tail())
 
-                # CALLING STACK PRIDICTION MODULE 
-                last_price, predicted_price, action = predict_stock_action(ticker_symbol)
+    except Exception as e:
+        st.error(f"🚨 Something went wrong: {e}")
 
-                # price = historical_data['Open']
-                
-                current_price = float(last_price)
-                formatted_amount = locale.currency(current_price, symbol=True, grouping=True)
+# ------------------ STREAMLIT UI ------------------
 
-                # GRAPH PLOTED FROM HERE 
-                st.write(' ') 
-                st.write(' ')
-                st.header(formatted_amount)
-
-                # Display graph in Streamlit
-                st.plotly_chart(fig, use_container_width=True)
-
-                
-                # BUY AND SELL INDICATOR
-                incol1, incol2 = st.columns(2)
-                st.write(' ') 
-                st.write(' ')
-                st.subheader('Buy and Sell indicator')
-
-                with incol1:
-                    st.write(f'Actual price    : {locale.currency(last_price, symbol=True, grouping=True)}')
-                
-                with incol2: 
-                    st.write(f'Predicted price : {locale.currency(predicted_price, symbol=True, grouping=True)}')
-
-                
-                # BUY OR SELL INDICATOR
-                ans = ai_call(ticker_symbol, formatted_amount, predicted_price)
-                sentiment_scores, review = get_sentiment_review(ans)
-
-                if action.lower() == 'buy': 
-                    indicator(f'{action.upper()}', '#1dcf46')
-                     
-                else:
-                    indicator(f'{action.upper()}', 'red')
-
-
-                # DISPLAYING RAW DATA OF 5
-                st.write(' ') 
-                st.write(' ')
-                # Display raw data
-                st.subheader('Historic Data')
-                st.dataframe(historical_data.head())
-
-
-                # SENTIMENT DATA PRINTING
-                st.write(' ') 
-                st.write(' ')
-                st.subheader('Sentiment Data')
-                sed1 , sed2 = st.columns(2)
-                
-                with sed1:
-                    st.markdown(f'Score : {sentiment_scores}')
-
-                with sed2:
-                    st.markdown(f'Indication : {review}')
-
-                # AI SUGGESTION ON STOCK
-                ai_answer = ai_call(ticker_symbol, formatted_amount, predicted_price, sentiment_scores)
-                st.write(' ') 
-                st.write(' ')
-                st.subheader('AI Suggestion ✨')
-                st.write(ai_answer)
-
-            else:
-                st.warning("No data available for the previous day.")
-
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
-
-
-
-
-
-
-
-st.title('InvestIQ')
-st.text('Smart Insights, Smarter Investments')
-st.write(' ')
-st.write(' ')
-
-
-# WARNING OR ERROR MESSAGE 
-msg = st.empty()
-
-# STOCK EXCHANGE LIST 
-stock_exchage = ['NSE' , 'BSE'] 
-
-# SEARCH BAR COLUMN 
-scol1, scol2 = st.columns(2)
-
-# SEARCH BUTTON COLUMN
-btncol1, btncol2 = st.columns(2)
-
-# STOCK INPUT 
-with scol1:
-    userInput = st.text_input('Enter stock name ')
-
-# SCTOCK EXCHANGE
-with scol2:
-    pass
-    stock = stock_option = st.selectbox("Select stock exchage", stock_exchage)
-
-
-ans = ''
-with btncol1:
-     if st.button('Submit', use_container_width=True): 
-        if userInput == "":
-            msg.warning('⚠️ Please entre stock name !')
-        else:
-            ans = get_stock_symbol(userInput)
-            if ans == '':
-                ans = ans.replace('.BO', '.NS')
-                msg.warning('⚠️ Enter valid company name !')
-            else:
-                pass
-
-               
-                
-
-st.write('')                
-plot_graph(ans)
-
-
-st.write('') 
-st.write('') 
-st.write('\n\n') 
+st.set_page_config(page_title="InvestIQ", layout="wide")
+st.title("📊 InvestIQ")
+st.caption("Smart Insights, Smarter Investments")
 st.divider()
-st.subheader('project by')
-st.write('1. Skanda Umesh\n 2. Nandan R')
+
+col1, col2 = st.columns(2)
+stock_name = col1.text_input("Enter stock name (e.g., TCS, RELIANCE)", "")
+exchange = col2.selectbox("Select exchange", ["BSE", "NSE"])
+
+symbol = ''
+if st.button("🔍 Analyze"):
+    if not stock_name.strip():
+        st.warning("Please enter a valid stock name.")
+    else:
+        symbol = get_stock_symbol(stock_name.strip(), exchange)
+
+if symbol:
+    st.write("")
+    plot_graph(symbol)
+
+st.divider()
+st.subheader("Project by ")
+st.markdown("\n Harish")
